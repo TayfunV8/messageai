@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Yerel Yapay Zeka</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #1a1d27; --text: #e8e8ec; --muted: #8b8fa3;
+    --accent: #6c8cff; --border: #2a2d3a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, system-ui, sans-serif;
+    background: var(--bg); color: var(--text); height: 100vh;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  #status { font-size: 12px; color: var(--muted); }
+  #chat { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 80%; padding: 10px 14px; border-radius: 12px; line-height: 1.5; white-space: pre-wrap; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: white; }
+  .msg.ai { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+  .msg.system { align-self: center; background: transparent; color: var(--muted); font-size: 13px; }
+  footer { padding: 14px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
+  #promptInput {
+    flex: 1; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); font-size: 14px;
+  }
+  button {
+    padding: 10px 16px; border-radius: 10px; border: none; background: var(--accent);
+    color: white; font-size: 14px; cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: var(--panel); border: 1px solid var(--border); color: var(--text); }
+  #loadBar { font-size: 12px; color: var(--muted); padding: 0 18px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🧠 Yerel Yapay Zeka</h1>
+  <div style="display:flex; align-items:center; gap:10px;">
+    <span id="status">Model yükleniyor...</span>
+    <button id="clearCacheBtn" class="secondary" title="Modeli güncellediysen kullan" style="font-size:11px; padding:4px 8px;">🗑️ Önbelleği temizle</button>
+  </div>
+</header>
+
+<div id="memoryBar" style="padding: 8px 18px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); display:flex; align-items:center; gap:10px;">
+  <label for="fileInput" style="cursor:pointer; background: var(--panel); border:1px solid var(--border); padding:6px 10px; border-radius:8px;">
+    📄 PDF/TXT ekle
+  </label>
+  <input id="fileInput" type="file" accept=".pdf,.txt,.md" multiple style="display:none;" />
+  <span id="memoryStatus">Hafızada belge yok</span>
+  <label style="margin-left:auto; display:flex; align-items:center; gap:6px; cursor:pointer;">
+    <input id="autoSearchToggle" type="checkbox" checked />
+    🔍 Her mesajda otomatik ara
+  </label>
+</div>
+
+<div id="sandboxBar" style="padding: 8px 18px; border-bottom: 1px solid var(--border); display:flex; gap:8px; align-items:center;">
+  <button id="toggleSandbox" class="secondary" style="font-size:12px; padding:6px 10px;">💻 Kod Çalıştır paneli</button>
+</div>
+
+<div id="sandboxPanel" style="display:none; padding: 12px 18px; border-bottom: 1px solid var(--border); gap:8px; flex-direction:column;">
+  <div style="display:flex; gap:8px; align-items:center;">
+    <select id="sandboxLang" style="background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:6px;">
+      <option value="javascript">JavaScript</option>
+      <option value="python">Python (ilk çalıştırmada birkaç MB indirir)</option>
+    </select>
+    <button id="sandboxRunBtn">▶ Çalıştır</button>
+  </div>
+  <textarea id="sandboxCode" rows="5" placeholder="console.log('merhaba dünya');" style="background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px; font-family: monospace; font-size:13px;"></textarea>
+  <pre id="sandboxOutput" style="background:#000; color:#0f0; padding:10px; border-radius:8px; font-size:12px; min-height:20px; margin:0; white-space:pre-wrap;"></pre>
+</div>
+
+<div id="loadBar"></div>
+
+<div id="chat">
+  <div class="msg system">Model dosyaları indirilip yükleniyor, birkaç saniye sürebilir...</div>
+</div>
+
+<footer>
+  <input id="promptInput" type="text" placeholder="Bir şey yaz..." disabled />
+  <button id="researchBtn" class="secondary" disabled title="İnternette ara">🔍</button>
+  <button id="sendBtn" disabled>Gönder</button>
+</footer>
+
+<script type="module">
+  import { BpeTokenizer } from "./js/tokenizer.js";
+  import { GptModel } from "./js/model.js";
+  import { loadWeights } from "./js/weights_loader.js";
+  import { runResearch } from "./js/research-agent.js";
+  import { extractTextFromFile } from "./js/pdf-reader.js";
+  import { VectorMemory } from "./js/vector-memory.js";
+  import { CodeSandbox, extractCodeBlocks } from "./js/sandbox.js";
+
+  const sandbox = new CodeSandbox();
+
+  // --- Bağımsız Kod Çalıştır paneli ---
+  const toggleSandboxBtn = document.getElementById("toggleSandbox");
+  const sandboxPanel = document.getElementById("sandboxPanel");
+  const sandboxRunBtn = document.getElementById("sandboxRunBtn");
+  const sandboxCode = document.getElementById("sandboxCode");
+  const sandboxLang = document.getElementById("sandboxLang");
+  const sandboxOutput = document.getElementById("sandboxOutput");
+
+  toggleSandboxBtn.addEventListener("click", () => {
+    sandboxPanel.style.display = sandboxPanel.style.display === "none" ? "flex" : "none";
+  });
+
+  sandboxRunBtn.addEventListener("click", async () => {
+    sandboxRunBtn.disabled = true;
+    sandboxOutput.textContent = "Çalıştırılıyor...";
+    const result = await sandbox.run(sandboxCode.value, sandboxLang.value);
+    sandboxOutput.textContent = result.success
+      ? result.output || "(çıktı yok - console.log() kullanmayı dene)"
+      : `HATA: ${result.error}`;
+    sandboxRunBtn.disabled = false;
+  });
+
+  // --- Sohbet mesajlarındaki kod bloklarına otomatik "▶ Çalıştır" butonu ---
+  function addRunButtonsToMessage(container, text) {
+    const blocks = extractCodeBlocks(text);
+    if (blocks.length === 0) return;
+
+    blocks.forEach((block) => {
+      const btn = document.createElement("button");
+      btn.textContent = `▶ ${block.language} çalıştır`;
+      btn.className = "secondary";
+      btn.style.cssText = "font-size:11px; padding:4px 8px; margin-top:6px; display:block;";
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        btn.textContent = "Çalıştırılıyor...";
+        const result = await sandbox.run(block.code, block.language);
+        const outEl = document.createElement("pre");
+        outEl.style.cssText = "background:#000; color:#0f0; padding:8px; border-radius:6px; font-size:11px; margin-top:4px; white-space:pre-wrap;";
+        outEl.textContent = result.success ? result.output || "(çıktı yok)" : `HATA: ${result.error}`;
+        btn.replaceWith(outEl);
+      });
+      container.appendChild(btn);
+    });
+  }
+
+  // PDF.js'in arka plan iş parçacığı (worker) dosyası - CDN'den
+  if (window.pdfjsLib) {
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.js";
+  }
+
+  const memory = new VectorMemory();
+  const fileInput = document.getElementById("fileInput");
+  const memoryStatus = document.getElementById("memoryStatus");
+
+  fileInput.addEventListener("change", async (e) => {
+    const files = Array.from(e.target.files);
+    for (const file of files) {
+      memoryStatus.textContent = `${file.name} okunuyor...`;
+      try {
+        const text = await extractTextFromFile(file);
+        const chunkCount = memory.addDocument(file.name, text);
+        addMessage(`📄 "${file.name}" hafızaya eklendi (${chunkCount} parça).`, "system");
+      } catch (err) {
+        addMessage(`❌ "${file.name}" okunamadı: ${err.message}`, "system");
+      }
+    }
+    memoryStatus.textContent =
+      memory.documentCount > 0
+        ? `${memory.documentCount} belge, ${memory.chunkCount} parça hafızada`
+        : "Hafızada belge yok";
+    fileInput.value = ""; // aynı dosyayı tekrar seçebilmek için
+  });
+
+  const chatEl = document.getElementById("chat");
+  const statusEl = document.getElementById("status");
+  const loadBarEl = document.getElementById("loadBar");
+  const inputEl = document.getElementById("promptInput");
+  const sendBtn = document.getElementById("sendBtn");
+  const researchBtn = document.getElementById("researchBtn");
+
+  function addMessage(text, cls) {
+    const div = document.createElement("div");
+    div.className = `msg ${cls}`;
+    div.textContent = text;
+    chatEl.appendChild(div);
+    chatEl.scrollTop = chatEl.scrollHeight;
+    return div;
+  }
+
+  let model = null;
+  let tokenizer = null;
+
+  async function init() {
+    try {
+      loadBarEl.textContent = "Tokenizer indiriliyor...";
+      tokenizer = await BpeTokenizer.loadFromUrl("./model_files/tokenizer_merges.json");
+
+      loadBarEl.textContent = "Ağırlıklar indiriliyor (model boyutuna göre birkaç saniye)...";
+      const [weights, configResp] = await Promise.all([
+        loadWeights("./model_files/weights.bin", "./model_files/weights_manifest.json"),
+        fetch("./model_files/config.json"),
+      ]);
+      const config = await configResp.json();
+
+      model = new GptModel(config, weights);
+
+      statusEl.textContent = "Model hazır ✅";
+      loadBarEl.textContent = "";
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      researchBtn.disabled = false;
+      addMessage("Model yüklendi. Bir şey sorabilirsin.", "system");
+    } catch (err) {
+      statusEl.textContent = "Yükleme hatası ❌";
+      loadBarEl.textContent = "";
+      addMessage(
+        `Model dosyaları yüklenemedi: ${err.message}\n\n` +
+          `Kontrol et: web/model_files/ klasöründe weights.bin, weights_manifest.json, config.json, tokenizer_merges.json var mı?`,
+        "system"
+      );
+    }
+  }
+
+  async function handleSend() {
+    const prompt = inputEl.value.trim();
+    if (!prompt || !model) return;
+
+    addMessage(prompt, "user");
+    inputEl.value = "";
+    sendBtn.disabled = true;
+
+    const aiDiv = addMessage("...", "ai");
+
+    // UI'ı kilitlememek için üretim bir sonraki "tick"e ertelenir
+    await new Promise((r) => setTimeout(r, 10));
+
+    const contextParts = [];
+    let searchSources = [];
+    let searchSummary = "";
+    let memorySummary = "";
+    let searchConfidence = 0;
+
+    // Arama sonucu yeterince güvenilirse (yüksek alaka skoru), küçük
+    // modelin zayıf/tutarsız üretimini hiç göstermiyoruz - sadece
+    // gürültü eklemiş olur. Bu eşiğin üstünde "arama zaten iyi bir
+    // cevap buldu" kabul ediyoruz.
+    const HIGH_CONFIDENCE_THRESHOLD = 0.15;
+
+    // 1) Otomatik internet araması (açıksa) - DuckDuckGo'dan gelen, gerçek
+    // kaynağa dayanan (extractive) özet - modelin "ezberi" değil, o an
+    // internetten bulunan gerçek metin.
+    if (autoSearchToggle.checked) {
+      aiDiv.textContent = "🔍 İnternette aranıyor...";
+      try {
+        const report = await runResearch(prompt);
+        if (report.sources.length > 0) {
+          searchSummary = report.summary;
+          searchConfidence = report.confidence;
+          contextParts.push(report.summary);
+          searchSources = report.sources;
+        }
+      } catch (err) {
+        // Arama başarısız olursa (proxy kurulu değilse vb.) sessizce
+        // devam ediyoruz - model kendi bilgisiyle cevap vermeye çalışır.
+      }
+    }
+
+    // 2) Yüklenmiş PDF/TXT hafızası varsa, alakalı parçaları da ekle
+    let memoryConfidence = 0;
+    if (memory.chunkCount > 0) {
+      const relevant = memory.search(prompt, 2);
+      if (relevant.length > 0 && relevant[0].score > 0.05) {
+        memorySummary = relevant.map((r) => `- ${r.text} [${r.docName}]`).join("\n");
+        memoryConfidence = relevant[0].score;
+        contextParts.push(memorySummary);
+      }
+    }
+
+    const bestConfidence = Math.max(searchConfidence, memoryConfidence);
+    const skipModel = bestConfidence >= HIGH_CONFIDENCE_THRESHOLD;
+
+    aiDiv.textContent = skipModel ? "Bulundu, hazırlanıyor..." : "Yazılıyor...";
+
+    try {
+      let modelText = "";
+
+      // Sadece güven düşükse (arama zayıf/boş) küçük modeli çalıştırıyoruz -
+      // güven yüksekse zaten güvenilir bir cevap var, modelin üretimi
+      // sadece zaman kaybettirir ve gürültü ekler.
+      if (!skipModel) {
+        const finalPrompt =
+          contextParts.length > 0
+            ? `Bağlam:\n${contextParts.join("\n\n")}\n\nSoru: ${prompt}\nCevap:`
+            : prompt;
+
+        const promptIds = tokenizer.encode(finalPrompt);
+        const outputIds = model.generate(promptIds, 100, { temperature: 0.8, topK: 40 });
+        const text = tokenizer.decode(outputIds);
+        modelText = text || "(boş çıktı)";
+      }
+
+      // Cevabı açıkça etiketlenmiş bölümler olarak sunuyoruz: (a) internetten/
+      // belgeden BULUNAN gerçek bilgi (güvenilir, kaynaklı) (b) - sadece güven
+      // düşükse - küçük modelin ürettiği YORUM (spekülatif). Bunları karıştırıp
+      // tek bir "cevap" gibi sunmak, hangisinin gerçek kaynağa dayandığını
+      // gizleyip yanıltıcı olurdu.
+      const sections = [];
+
+      if (searchSummary || memorySummary) {
+        const foundParts = [searchSummary, memorySummary].filter(Boolean).join("\n");
+        const label = skipModel ? "📚 Bulunan bilgiler (güvenilir):" : "📚 Bulunan bilgiler:";
+        sections.push(`${label}\n${foundParts}`);
+      }
+
+      if (!skipModel) {
+        sections.push(`🤖 Modelin yorumu (küçük model, kesin bilgi değil):\n${modelText}`);
+      }
+
+      if (searchSources.length > 0) {
+        const sourceList = searchSources
+          .map((s) => `${s.trusted ? "✅" : "•"} ${s.title} (${s.url})`)
+          .join("\n");
+        sections.push(`--- Kaynaklar ---\n${sourceList}`);
+      }
+
+      const finalText = sections.join("\n\n");
+
+      aiDiv.textContent = finalText;
+      addRunButtonsToMessage(aiDiv, finalText);
+    } catch (err) {
+      aiDiv.textContent = `Hata: ${err.message}`;
+    } finally {
+      sendBtn.disabled = false;
+    }
+  }
+
+  async function handleResearch() {
+    const query = inputEl.value.trim();
+    if (!query) return;
+
+    addMessage(`🔍 Aranıyor: ${query}`, "user");
+    inputEl.value = "";
+    researchBtn.disabled = true;
+
+    const aiDiv = addMessage("Araştırılıyor...", "ai");
+
+    try {
+      const report = await runResearch(query);
+      const sourceList = report.sources.map((s) => `• ${s.title} (${s.url})`).join("\n");
+      aiDiv.textContent = `${report.summary}\n\n--- Kaynaklar ---\n${sourceList || "(yok)"}`;
+    } catch (err) {
+      aiDiv.textContent = `Arama hatası: ${err.message}\n\nproxy/worker.js kurulumunu ve research-agent.js içindeki PROXY_URL'i kontrol et.`;
+    } finally {
+      researchBtn.disabled = false;
+    }
+  }
+
+  sendBtn.addEventListener("click", handleSend);
+  researchBtn.addEventListener("click", handleResearch);
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") handleSend();
+  });
+
+  // Service Worker'ı kaydet - model dosyalarını kalıcı önbelleğe alır,
+  // sonraki ziyaretlerde site (model dahil) anında açılır, internetsiz
+  // bile çalışır. Desteklemeyen tarayıcılarda (nadir) sessizce atlanır.
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("./sw.js").catch((err) => {
+      console.warn("Service Worker kaydedilemedi (site yine de çalışır):", err);
+    });
+  }
+
+  // "Önbelleği temizle" butonu: modeli yeniden eğitip dosyaları
+  // güncellediğinde, tarayıcının eski (önbellekteki) modeli göstermeye
+  // devam etmesini önlemek için kullanılır.
+  document.getElementById("clearCacheBtn").addEventListener("click", async () => {
+    if (!confirm("Önbellek temizlenecek ve sayfa yeniden yüklenecek. Devam edilsin mi?")) return;
+    if ("caches" in window) {
+      const names = await caches.keys();
+      await Promise.all(names.map((n) => caches.delete(n)));
+    }
+    if ("serviceWorker" in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.unregister()));
+    }
+    location.reload(true);
+  });
+
+  init();
+</script>
+
+</body>
+</html>
