@@ -12,21 +12,42 @@
  * değiştirmen gerekiyor (kurulum talimatı worker.js dosyasının başında).
  */
 
-const PROXY_URL = "https://messageai.messageai.workers.dev"; // <-- BURAYI DEĞİŞTİR
+const PROXY_URL = "https://SENIN-WORKER-ADIN.workers.dev"; // <-- BURAYI DEĞİŞTİR
 
 import { buildIdf, embed, cosineSimilarity } from "./embeddings.js";
 
+/**
+ * Kurulum sırasında en sık yapılan hata: PROXY_URL'i kendi Worker adresiyle
+ * değiştirmeyi unutmak. Bu durumda istek zaten var olmayan bir domain'e
+ * gidip genel bir "fetch failed" hatası verir - bu da sorunun ne olduğunu
+ * anlamayı zorlaştırır. Bunun yerine, en baştan net bir Türkçe hata
+ * fırlatıyoruz ki README'deki Adım 2'ye geri dönülmesi gerektiği açık olsun.
+ */
+function assertProxyConfigured() {
+  if (!PROXY_URL || PROXY_URL.includes("SENIN-WORKER-ADIN")) {
+    throw new Error(
+      "PROXY_URL ayarlanmamış. js/research-agent.js dosyasının en üstündeki " +
+        'PROXY_URL değerini kendi Cloudflare Worker adresinle değiştir (README, Adım 2).'
+    );
+  }
+}
+
 function proxied(targetUrl) {
+  assertProxyConfigured();
   return `${PROXY_URL}/?url=${encodeURIComponent(targetUrl)}`;
 }
 
 /**
  * DuckDuckGo HTML arayüzünden arama yapar.
+ * @param {string} query
+ * @param {number} maxResults
+ * @param {AbortSignal} [signal] - verilirse, kullanıcı isteği iptal ettiğinde
+ *   (ör. "✕ İptal" butonu) bu ağ isteği de anında kesilir.
  * @returns {Promise<Array<{title: string, url: string, snippet: string}>>}
  */
-export async function webSearch(query, maxResults = 5) {
+export async function webSearch(query, maxResults = 5, signal) {
   const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  const resp = await fetch(proxied(searchUrl));
+  const resp = await fetch(proxied(searchUrl), { signal });
   if (!resp.ok) {
     throw new Error(`Arama başarısız (HTTP ${resp.status}). Proxy adresini kontrol et.`);
   }
@@ -71,9 +92,9 @@ const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NAV", "FOOTER", "HEADER", "NOSCRI
  * Bir URL'den temiz (gürültüsüz) metin çıkarır.
  * @returns {Promise<string|null>} başarısız olursa null (o kaynağı atla)
  */
-export async function fetchPageText(url, maxChars = 3000) {
+export async function fetchPageText(url, maxChars = 3000, signal) {
   try {
-    const resp = await fetch(proxied(url));
+    const resp = await fetch(proxied(url), { signal });
     if (!resp.ok) return null;
     const contentType = resp.headers.get("Content-Type") || "";
     if (!contentType.includes("text")) return null;
@@ -94,66 +115,30 @@ export async function fetchPageText(url, maxChars = 3000) {
       .join("\n");
 
     return cleaned.slice(0, maxChars);
-  } catch {
+  } catch (err) {
+    // İptal isteğini yutmuyoruz - yukarıya (gatherSources -> runResearch ->
+    // index.html) fırlatıyoruz ki "İptal edildi" mesajı doğru gösterilsin.
+    if (err && err.name === "AbortError") throw err;
     return null;
   }
 }
 
 /**
- * Sorguyu arayıp ilk sonuçların içeriğini toplar.
+ * Sorguyu arayıp ilk sonuçların içeriğini toplar. Kullanıcı isteğiyle:
+ * ARTIK hiçbir domain'e öncelik/rozet verilmiyor - önceden burada bir
+ * "güvenilir domain" listesi (Wikipedia, .gov, BBC vb.) sonuçları öne
+ * çekiyordu; bu tamamen kaldırıldı. Sonuçlar DuckDuckGo'nun döndürdüğü
+ * doğal sırayla, hangi site olursa olsun eşit şekilde kullanılıyor.
  */
-/**
- * Genel olarak daha güvenilir kabul edilen kaynak türleri: resmi kurumlar
- * (.gov, .edu), ansiklopedik/referans siteler, tanınmış haber kuruluşları.
- * Bu bir "doğruluk garantisi" değil - sadece rastgele bir blogdan önce
- * bu tür kaynakları öncelemek için basit bir sezgisel (heuristic) sıralama.
- */
-const TRUSTED_DOMAIN_PATTERNS = [
-  /\.gov(\.\w+)?$/,
-  /\.edu(\.\w+)?$/,
-  /(^|\.)wikipedia\.org$/,
-  /(^|\.)britannica\.com$/,
-  /(^|\.)reuters\.com$/,
-  /(^|\.)bbc\.(com|co\.uk)$/,
-  /(^|\.)tdk\.gov\.tr$/,
-  /(^|\.)who\.int$/,
-  /(^|\.)nature\.com$/,
-  /(^|\.)developer\.mozilla\.org$/,
-];
-
-function trustScore(url) {
-  try {
-    const hostname = new URL(url).hostname;
-    return TRUSTED_DOMAIN_PATTERNS.some((re) => re.test(hostname)) ? 1 : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function sortByTrust(hits) {
-  // Stabil sıralama: güvenilir olanlar öne alınır, kendi aralarındaki
-  // (ve güvenilir olmayanların kendi aralarındaki) orijinal DDG sırası
-  // korunur - yani "en alakalıyı at, sadece güvenilirliği ata" değil,
-  // "eşit koşulda güvenilir olanı öne çek" mantığı.
-  return hits
-    .map((hit, idx) => ({ hit, idx, trust: trustScore(hit.url) }))
-    .sort((a, b) => b.trust - a.trust || a.idx - b.idx)
-    .map((x) => x.hit);
-}
-
-/**
- * Sorguyu arayıp ilk sonuçların içeriğini toplar. Güvenilir kaynaklar
- * (varsa) önceliklendirilir.
- */
-export async function gatherSources(query, maxSources = 4, perSourceChars = 2000) {
-  const hits = sortByTrust(await webSearch(query, maxSources * 2));
+export async function gatherSources(query, maxSources = 4, perSourceChars = 2000, signal) {
+  const hits = await webSearch(query, maxSources * 2, signal);
   const sources = [];
 
   for (const hit of hits) {
     if (sources.length >= maxSources) break;
-    const text = await fetchPageText(hit.url, perSourceChars);
+    const text = await fetchPageText(hit.url, perSourceChars, signal);
     if (text && text.length > 200) {
-      sources.push({ title: hit.title, url: hit.url, content: text, trusted: trustScore(hit.url) === 1 });
+      sources.push({ title: hit.title, url: hit.url, content: text });
     }
   }
 
@@ -211,13 +196,17 @@ export function extractiveSummary(sources, query, maxSentences = 10) {
  * Ana giriş noktası: sorgu -> kaynaklar -> özet.
  *
  * `confidence` alanı, arama sonucunun ne kadar güvenilir olduğunu (en
- * alakalı cümlenin skoru) gösterir. Bu, modelin zayıf üretimine ne kadar
- * güvenileceğine karar vermek için kullanılıyor (bkz. index.html) -
- * arama GÜÇLÜ bir sonuç bulduysa, küçük modelin "yorumuna" hiç gerek
- * kalmayabilir; arama zayıf/boşsa model devreye girer.
+ * alakalı cümlenin skoru) gösterir - index.html bunu şu an sadece bilgi
+ * amaçlı gösteriyor; bulunan bilgi ile küçük modelin kendi yorumu ARTIK
+ * HER ZAMAN birlikte gösteriliyor (biri diğerini ekarte etmiyor).
+ *
+ * @param {string} query
+ * @param {{signal?: AbortSignal}} [options] - signal verilirse kullanıcı
+ *   "İptal" butonuna bastığında arama anında kesilir (AbortError fırlatır).
  */
-export async function runResearch(query) {
-  const sources = await gatherSources(query, 5); // 4 -> 5: biraz daha geniş kaynak havuzu
+export async function runResearch(query, options = {}) {
+  const { signal } = options;
+  const sources = await gatherSources(query, 5, 2000, signal); // 4 -> 5: biraz daha geniş kaynak havuzu
   if (sources.length === 0) {
     return { query, sources: [], summary: "Hiçbir kaynağa ulaşılamadı (proxy adresini kontrol et).", confidence: 0 };
   }

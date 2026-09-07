@@ -14,7 +14,7 @@
  * yanlışlıkla eski bir modeli yenisiyle karıştırmamak için).
  */
 
-const CACHE_NAME = "local-ai-cache-v1";
+const CACHE_NAME = "local-ai-cache-v2";
 
 // Site açılır açılmaz indirilip kalıcı önbelleğe alınacak dosyalar.
 // Model dosyaları en büyük (ve en değerli) kısım - bunları ÖNCELİKLE
@@ -29,8 +29,6 @@ const PRECACHE_URLS = [
   "./js/embeddings.js",
   "./js/vector-memory.js",
   "./js/pdf-reader.js",
-  "./js/sandbox.js",
-  "./js/sandbox-worker.js",
   "./model_files/weights.bin",
   "./model_files/weights_manifest.json",
   "./model_files/config.json",

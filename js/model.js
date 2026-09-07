@@ -268,9 +268,21 @@ export class GptModel {
     return logits;
   }
 
-  /** Basit top-k + sıcaklık örneklemesi. */
-  _sample(logits, temperature, topK) {
-    const scaled = Array.from(logits, (v) => v / Math.max(temperature, 1e-6));
+  /**
+   * Basit top-k + sıcaklık örneklemesi. `recentIds` verilirse (Set), o
+   * token'ların logit'i `repetitionPenalty` ile cezalandırılır - küçük
+   * modellerin sık düştüğü "aynı kelimeyi/kalıbı sonsuz tekrar etme"
+   * sorununu azaltmak için. Standart yöntem: pozitif logit'i böl, negatif
+   * logit'i çarp (ikisi de logiti KÜÇÜLTÜR, işaretten bağımsız).
+   */
+  _sample(logits, temperature, topK, recentIds = null, repetitionPenalty = 1.0) {
+    const scaled = Array.from(logits, (v, i) => {
+      let val = v / Math.max(temperature, 1e-6);
+      if (recentIds && repetitionPenalty !== 1.0 && recentIds.has(i)) {
+        val = val > 0 ? val / repetitionPenalty : val * repetitionPenalty;
+      }
+      return val;
+    });
     const indexed = scaled.map((v, i) => [i, v]);
     indexed.sort((a, b) => b[1] - a[1]);
     const top = indexed.slice(0, Math.max(1, Math.min(topK, indexed.length)));
@@ -291,19 +303,37 @@ export class GptModel {
   /**
    * KV-cache'li üretim. promptIds: encode edilmiş başlangıç dizisi.
    * onToken: (isteğe bağlı) her yeni token üretildiğinde çağrılır - UI'da
-   * kelime kelime akan bir yazı efekti için kullanışlı.
+   * kelime kelime akan bir yazı efekti için kullanışlı. onToken `true`
+   * (veya herhangi bir "truthy" değer) DÖNDÜRÜRSE üretim hemen durur -
+   * bu, çağıran tarafın (index.html) her token sonrası metni decode edip
+   * bir "durdurma işareti" (ör. "<son>") görüp görmediğini kontrol
+   * etmesine izin verir. Böylece model, eğitimde öğrendiği doğal bir
+   * bitiş noktasında durabilir; aksi halde her seferinde maxNewTokens
+   * kadar (gereksiz, alakasız) metin üretmeye devam eder.
+   *
+   * repetitionPenalty (varsayılan 1.3): son ~64 üretilen token'ı hafifçe
+   * cezalandırarak "aynı kelimeyi/cümleyi döngü halinde tekrar etme"
+   * davranışını azaltır - küçük modellerde en sık görülen bozuk çıktı
+   * türlerinden biri budur. 1.0 verirsen ceza tamamen kapanır (eski davranış).
    */
-  generate(promptIds, maxNewTokens, { temperature = 0.8, topK = 40, onToken = null } = {}) {
+  generate(promptIds, maxNewTokens, { temperature = 0.8, topK = 40, onToken = null, repetitionPenalty = 1.3 } = {}) {
     const caches = Array.from({ length: this.cfg.n_layer }, () => ({ k: null, v: null, len: 0 }));
     const allIds = [...promptIds];
+    const RECENT_WINDOW = 64;
+    const recentIds = new Set();
+    const pushRecent = (id) => {
+      recentIds.add(id);
+      if (recentIds.size > RECENT_WINDOW) recentIds.delete(recentIds.values().next().value);
+    };
 
     const blockSize = this.cfg.block_size;
     let promptWindow = promptIds.length > blockSize ? promptIds.slice(-blockSize) : promptIds;
 
     let logits = this.forward(promptWindow, caches);
-    let nextId = this._sample(logits, temperature, topK);
+    let nextId = this._sample(logits, temperature, topK, recentIds, repetitionPenalty);
     allIds.push(nextId);
-    if (onToken) onToken(nextId);
+    pushRecent(nextId);
+    if (onToken && onToken(nextId)) return allIds.slice(promptIds.length);
 
     for (let i = 0; i < maxNewTokens - 1; i++) {
       const totalLen = caches[0].len + 1;
@@ -319,9 +349,10 @@ export class GptModel {
       } else {
         logits = this.forward([nextId], caches);
       }
-      nextId = this._sample(logits, temperature, topK);
+      nextId = this._sample(logits, temperature, topK, recentIds, repetitionPenalty);
       allIds.push(nextId);
-      if (onToken) onToken(nextId);
+      pushRecent(nextId);
+      if (onToken && onToken(nextId)) break;
     }
 
     return allIds.slice(promptIds.length);

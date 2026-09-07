@@ -47,6 +47,8 @@
   <h1>🧠 Yerel Yapay Zeka</h1>
   <div style="display:flex; align-items:center; gap:10px;">
     <span id="status">Model yükleniyor...</span>
+    <button id="adminLoginBtn" class="secondary" title="Admin girişi" style="font-size:11px; padding:4px 8px;">🔒 Admin</button>
+    <button id="downloadTeachingsBtn" class="secondary" style="display:none; font-size:11px; padding:4px 8px;" title="Öğretilenleri indir">📥 Öğretilenler (<span id="teachingCount">0</span>)</button>
     <button id="clearCacheBtn" class="secondary" title="Modeli güncellediysen kullan" style="font-size:11px; padding:4px 8px;">🗑️ Önbelleği temizle</button>
   </div>
 </header>
@@ -63,22 +65,6 @@
   </label>
 </div>
 
-<div id="sandboxBar" style="padding: 8px 18px; border-bottom: 1px solid var(--border); display:flex; gap:8px; align-items:center;">
-  <button id="toggleSandbox" class="secondary" style="font-size:12px; padding:6px 10px;">💻 Kod Çalıştır paneli</button>
-</div>
-
-<div id="sandboxPanel" style="display:none; padding: 12px 18px; border-bottom: 1px solid var(--border); gap:8px; flex-direction:column;">
-  <div style="display:flex; gap:8px; align-items:center;">
-    <select id="sandboxLang" style="background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:6px;">
-      <option value="javascript">JavaScript</option>
-      <option value="python">Python (ilk çalıştırmada birkaç MB indirir)</option>
-    </select>
-    <button id="sandboxRunBtn">▶ Çalıştır</button>
-  </div>
-  <textarea id="sandboxCode" rows="5" placeholder="console.log('merhaba dünya');" style="background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px; font-family: monospace; font-size:13px;"></textarea>
-  <pre id="sandboxOutput" style="background:#000; color:#0f0; padding:10px; border-radius:8px; font-size:12px; min-height:20px; margin:0; white-space:pre-wrap;"></pre>
-</div>
-
 <div id="loadBar"></div>
 
 <div id="chat">
@@ -88,6 +74,7 @@
 <footer>
   <input id="promptInput" type="text" placeholder="Bir şey yaz..." disabled />
   <button id="researchBtn" class="secondary" disabled title="İnternette ara">🔍</button>
+  <button id="cancelBtn" class="secondary" style="display:none; background:#4a2323; border-color:#6b3535;" title="Devam eden isteği iptal et">✕ İptal</button>
   <button id="sendBtn" disabled>Gönder</button>
 </footer>
 
@@ -98,54 +85,6 @@
   import { runResearch } from "./js/research-agent.js";
   import { extractTextFromFile } from "./js/pdf-reader.js";
   import { VectorMemory } from "./js/vector-memory.js";
-  import { CodeSandbox, extractCodeBlocks } from "./js/sandbox.js";
-
-  const sandbox = new CodeSandbox();
-
-  // --- Bağımsız Kod Çalıştır paneli ---
-  const toggleSandboxBtn = document.getElementById("toggleSandbox");
-  const sandboxPanel = document.getElementById("sandboxPanel");
-  const sandboxRunBtn = document.getElementById("sandboxRunBtn");
-  const sandboxCode = document.getElementById("sandboxCode");
-  const sandboxLang = document.getElementById("sandboxLang");
-  const sandboxOutput = document.getElementById("sandboxOutput");
-
-  toggleSandboxBtn.addEventListener("click", () => {
-    sandboxPanel.style.display = sandboxPanel.style.display === "none" ? "flex" : "none";
-  });
-
-  sandboxRunBtn.addEventListener("click", async () => {
-    sandboxRunBtn.disabled = true;
-    sandboxOutput.textContent = "Çalıştırılıyor...";
-    const result = await sandbox.run(sandboxCode.value, sandboxLang.value);
-    sandboxOutput.textContent = result.success
-      ? result.output || "(çıktı yok - console.log() kullanmayı dene)"
-      : `HATA: ${result.error}`;
-    sandboxRunBtn.disabled = false;
-  });
-
-  // --- Sohbet mesajlarındaki kod bloklarına otomatik "▶ Çalıştır" butonu ---
-  function addRunButtonsToMessage(container, text) {
-    const blocks = extractCodeBlocks(text);
-    if (blocks.length === 0) return;
-
-    blocks.forEach((block) => {
-      const btn = document.createElement("button");
-      btn.textContent = `▶ ${block.language} çalıştır`;
-      btn.className = "secondary";
-      btn.style.cssText = "font-size:11px; padding:4px 8px; margin-top:6px; display:block;";
-      btn.addEventListener("click", async () => {
-        btn.disabled = true;
-        btn.textContent = "Çalıştırılıyor...";
-        const result = await sandbox.run(block.code, block.language);
-        const outEl = document.createElement("pre");
-        outEl.style.cssText = "background:#000; color:#0f0; padding:8px; border-radius:6px; font-size:11px; margin-top:4px; white-space:pre-wrap;";
-        outEl.textContent = result.success ? result.output || "(çıktı yok)" : `HATA: ${result.error}`;
-        btn.replaceWith(outEl);
-      });
-      container.appendChild(btn);
-    });
-  }
 
   // PDF.js'in arka plan iş parçacığı (worker) dosyası - CDN'den
   if (window.pdfjsLib) {
@@ -180,8 +119,41 @@
   const statusEl = document.getElementById("status");
   const loadBarEl = document.getElementById("loadBar");
   const inputEl = document.getElementById("promptInput");
+  const adminLoginBtn = document.getElementById("adminLoginBtn");
+  const downloadTeachingsBtn = document.getElementById("downloadTeachingsBtn");
+  const teachingCountEl = document.getElementById("teachingCount");
   const sendBtn = document.getElementById("sendBtn");
   const researchBtn = document.getElementById("researchBtn");
+  const cancelBtn = document.getElementById("cancelBtn");
+
+  // Devam eden bir isteği iptal edebilmek için basit bir "iptal jetonu".
+  // Her yeni istekte taze bir nesne oluşturuyoruz (önceki isteğin iptal
+  // butonuna geç basılması yeni isteği etkilemesin diye); arama ağ
+  // istekleri AbortController.signal ile, model üretimi ise onToken
+  // callback'inin döngüyü kırmasıyla (bkz. model.js generate()) durdurulur.
+  let activeCancelToken = null;
+
+  function beginRequest() {
+    const controller = new AbortController();
+    const token = { cancelled: false, controller };
+    activeCancelToken = token;
+    cancelBtn.style.display = "inline-block";
+    return token;
+  }
+
+  function endRequest(token) {
+    if (activeCancelToken === token) {
+      activeCancelToken = null;
+      cancelBtn.style.display = "none";
+    }
+  }
+
+  cancelBtn.addEventListener("click", () => {
+    if (activeCancelToken) {
+      activeCancelToken.cancelled = true;
+      activeCancelToken.controller.abort();
+    }
+  });
 
   function addMessage(text, cls) {
     const div = document.createElement("div");
@@ -190,6 +162,101 @@
     chatEl.appendChild(div);
     chatEl.scrollTop = chatEl.scrollHeight;
     return div;
+  }
+
+  // ============== ADMIN GİRİŞİ VE "Öğret->" KOMUTU ==============
+  //
+  // ÖNEMLİ DÜRÜSTLÜK NOTU: Bu site tamamen statik (GitHub Pages, sunucu
+  // yok). Bu yüzden bu şifre kontrolü GERÇEK GÜVENLİK DEĞİL - sayfa
+  // kaynağını görüntüleyen HERKES bu şifreyi düz metin olarak görebilir.
+  // Bu sadece "rastgele bir ziyaretçi yanlışlıkla admin komutu yazmasın"
+  // seviyesinde basit bir engel. Gerçekten önemli/gizli bir şifre KULLANMA.
+  const ADMIN_PASSWORD = "admin123"; // <-- unutma: bu gerçek güvenlik değil, sadece basit bir engel
+
+  let isAdmin = false;
+  const TEACHINGS_KEY = "adminTeachings";
+
+  function loadTeachings() {
+    try {
+      return JSON.parse(localStorage.getItem(TEACHINGS_KEY) || "[]");
+    } catch {
+      return [];
+    }
+  }
+
+  function saveTeachings(list) {
+    localStorage.setItem(TEACHINGS_KEY, JSON.stringify(list));
+    teachingCountEl.textContent = String(list.length);
+    downloadTeachingsBtn.style.display = list.length > 0 ? "inline-block" : "none";
+  }
+
+  adminLoginBtn.addEventListener("click", () => {
+    if (isAdmin) {
+      isAdmin = false;
+      adminLoginBtn.textContent = "🔒 Admin";
+      addMessage("Admin modundan çıkıldı.", "system");
+      return;
+    }
+    const pw = prompt("Admin şifresi:");
+    if (pw === null) return;
+    if (pw === ADMIN_PASSWORD) {
+      isAdmin = true;
+      adminLoginBtn.textContent = "🔓 Admin (aktif)";
+      addMessage(
+        "✅ Admin modu aktif. Model'e bir şey öğretmek için mesajını " +
+          '"Öğret->" ile başlat.\n\n' +
+          "İki format kullanabilirsin:\n" +
+          '1) Soru-cevap: "Öğret-> nasılsın => İyiyim, sen nasılsın?"\n' +
+          '2) Genel bilgi/metin: "Öğret-> Ankara Türkiye\'nin başkentidir ve..."\n\n' +
+          "Öğrettiklerin tarayıcında biriktirilir, üstteki 📥 butonuyla " +
+          "indirip Colab'daki eğitim defterine atabilirsin.",
+        "system"
+      );
+      saveTeachings(loadTeachings()); // sayaç/buton görünürlüğünü güncelle
+    } else {
+      addMessage("❌ Yanlış şifre.", "system");
+    }
+  });
+
+  downloadTeachingsBtn.addEventListener("click", () => {
+    const list = loadTeachings();
+    const blob = new Blob([JSON.stringify(list, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "admin_egitim_verisi.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  /**
+   * "Öğret-> ..." komutunu işler. `=>` varsa soru/cevap çifti olarak,
+   * yoksa serbest metin (genel bilgi) olarak kaydeder. Model bu kaydı
+   * ANINDA öğrenmez - sadece daha sonra Colab'da yeniden eğitim için
+   * biriktirir (bkz. index.html'in üstündeki dürüstlük notu ve daha önce
+   * konuştuğumuz "canlı öğrenme küçük modeli bozar" riski).
+   */
+  function handleTeachCommand(rawContent) {
+    const list = loadTeachings();
+    const sepIdx = rawContent.indexOf("=>");
+    if (sepIdx !== -1) {
+      const soru = rawContent.slice(0, sepIdx).trim();
+      const cevap = rawContent.slice(sepIdx + 2).trim();
+      if (!soru || !cevap) {
+        addMessage('⚠️ Format hatalı. Örnek: "Öğret-> soru metni => cevap metni"', "system");
+        return;
+      }
+      list.push({ type: "qa", soru, cevap, ts: Date.now() });
+    } else {
+      const content = rawContent.trim();
+      if (!content) {
+        addMessage("⚠️ Öğret-> yazdın ama içerik boş.", "system");
+        return;
+      }
+      list.push({ type: "text", content, ts: Date.now() });
+    }
+    saveTeachings(list);
+    addMessage(`✅ Kaydedildi (toplam ${list.length} örnek). Eğitime dahil etmek için 📥 ile indir.`, "system");
   }
 
   let model = null;
@@ -232,9 +299,20 @@
 
     addMessage(prompt, "user");
     inputEl.value = "";
+
+    // Admin modundayken "Öğret->" ile başlayan mesajlar normal sohbete
+    // GİRMEZ - sadece veri olarak kaydedilir (model şu an bunu öğrenmiyor,
+    // sadece daha sonra Colab'da yeniden eğitim için biriktiriliyor).
+    const TEACH_PREFIX = "öğret->";
+    if (isAdmin && prompt.toLowerCase().startsWith(TEACH_PREFIX)) {
+      handleTeachCommand(prompt.slice(TEACH_PREFIX.length));
+      return;
+    }
+
     sendBtn.disabled = true;
 
     const aiDiv = addMessage("...", "ai");
+    const cancelToken = beginRequest();
 
     // UI'ı kilitlememek için üretim bir sonraki "tick"e ertelenir
     await new Promise((r) => setTimeout(r, 10));
@@ -243,87 +321,122 @@
     let searchSources = [];
     let searchSummary = "";
     let memorySummary = "";
-    let searchConfidence = 0;
-
-    // Arama sonucu yeterince güvenilirse (yüksek alaka skoru), küçük
-    // modelin zayıf/tutarsız üretimini hiç göstermiyoruz - sadece
-    // gürültü eklemiş olur. Bu eşiğin üstünde "arama zaten iyi bir
-    // cevap buldu" kabul ediyoruz.
-    const HIGH_CONFIDENCE_THRESHOLD = 0.15;
 
     // 1) Otomatik internet araması (açıksa) - DuckDuckGo'dan gelen, gerçek
     // kaynağa dayanan (extractive) özet - modelin "ezberi" değil, o an
     // internetten bulunan gerçek metin.
     if (autoSearchToggle.checked) {
-      aiDiv.textContent = "🔍 İnternette aranıyor...";
+      aiDiv.textContent = "Düşünülüyor... (iptal edebilirsin)";
       try {
-        const report = await runResearch(prompt);
+        const report = await runResearch(prompt, { signal: cancelToken.controller.signal });
         if (report.sources.length > 0) {
           searchSummary = report.summary;
-          searchConfidence = report.confidence;
           contextParts.push(report.summary);
           searchSources = report.sources;
         }
       } catch (err) {
-        // Arama başarısız olursa (proxy kurulu değilse vb.) sessizce
-        // devam ediyoruz - model kendi bilgisiyle cevap vermeye çalışır.
+        if (cancelToken.cancelled) {
+          aiDiv.textContent = "İptal edildi.";
+          endRequest(cancelToken);
+          sendBtn.disabled = false;
+          return;
+        }
+        // Arama başarısız olursa sohbete devam ediyoruz (model kendi
+        // bilgisiyle cevap vermeye çalışır) ama HATAYI ARTIK GİZLEMİYORUZ -
+        // önceden burası tamamen sessizdi, bu da "🔍 neden hiç çalışmıyor"
+        // sorusunu teşhis etmeyi imkansız kılıyordu.
+        addMessage(`⚠️ Arama başarısız: ${err.message}`, "system");
       }
     }
 
+    if (cancelToken.cancelled) {
+      aiDiv.textContent = "İptal edildi.";
+      endRequest(cancelToken);
+      sendBtn.disabled = false;
+      return;
+    }
+
     // 2) Yüklenmiş PDF/TXT hafızası varsa, alakalı parçaları da ekle
-    let memoryConfidence = 0;
     if (memory.chunkCount > 0) {
       const relevant = memory.search(prompt, 2);
       if (relevant.length > 0 && relevant[0].score > 0.05) {
         memorySummary = relevant.map((r) => `- ${r.text} [${r.docName}]`).join("\n");
-        memoryConfidence = relevant[0].score;
         contextParts.push(memorySummary);
       }
     }
 
-    const bestConfidence = Math.max(searchConfidence, memoryConfidence);
-    const skipModel = bestConfidence >= HIGH_CONFIDENCE_THRESHOLD;
-
-    aiDiv.textContent = skipModel ? "Bulundu, hazırlanıyor..." : "Yazılıyor...";
+    // ÖNEMLİ: arama/hafıza bir şey bulsa BİLE modeli hep çalıştırıyoruz -
+    // artık "arama zaten iyi bir sonuç buldu, modelin yorumunu tamamen
+    // gizle" davranışı yok. Bulunan bilgi ile modelin kendi (ezberlediği/
+    // öğrendiği) yorumu HER ZAMAN ayrı ayrı, birlikte gösteriliyor;
+    // hangisinin kaynaklı/gerçek hangisinin spekülatif olduğu net kalsın
+    // diye etiketler duruyor.
+    aiDiv.textContent = "Düşünülüyor... (iptal edebilirsin)";
 
     try {
       let modelText = "";
 
-      // Sadece güven düşükse (arama zayıf/boş) küçük modeli çalıştırıyoruz -
-      // güven yüksekse zaten güvenilir bir cevap var, modelin üretimi
-      // sadece zaman kaybettirir ve gürültü ekler.
-      if (!skipModel) {
-        const finalPrompt =
-          contextParts.length > 0
-            ? `Bağlam:\n${contextParts.join("\n\n")}\n\nSoru: ${prompt}\nCevap:`
-            : prompt;
+      // ÖNEMLİ: prompt'u HER ZAMAN aynı "Soru:/Cevap:" şablonuyla sarıyoruz -
+      // bağlam olsun ya da olmasın. Model eğitimde sadece bu şablonu (bkz.
+      // eğitim defterindeki diyalog verisi) gördüyse, çıplak "merhaba" gibi
+      // bir metin verildiğinde bunu soru olarak değil, rastgele bir
+      // Wikipedia cümlesinin devamı olarak yorumluyor - tutarsız/konu dışı
+      // çıktının asıl sebebi buydu.
+      const finalPrompt =
+        contextParts.length > 0
+          ? `Bağlam:\n${contextParts.join("\n\n")}\n\nSoru: ${prompt}\nCevap:`
+          : `Soru: ${prompt}\nCevap:`;
 
-        const promptIds = tokenizer.encode(finalPrompt);
-        const outputIds = model.generate(promptIds, 100, { temperature: 0.8, topK: 40 });
-        const text = tokenizer.decode(outputIds);
-        modelText = text || "(boş çıktı)";
+      const promptIds = tokenizer.encode(finalPrompt);
+
+      // Eğitim verisindeki her diyalog örneği "<son>" ile bitiyor (bkz.
+      // eğitim defteri). Bu işareti gördüğümüz an üretimi durduruyoruz -
+      // yoksa model doğal bitiş noktasından sonra da 100 token'a kadar
+      // alakasız metin üretmeye devam ediyordu. Kullanıcı "İptal" butonuna
+      // basarsa da aynı yoldan (onToken -> true) döngü hemen kırılır.
+      const STOP_MARKER = "<son>";
+      const generatedIds = [];
+      const outputIds = model.generate(promptIds, 100, {
+        temperature: 0.45, // düşürüldü (0.7'den) - model daha "temkinli" kelime seçer,
+                            // halüsinasyonu ORTADAN KALDIRMAZ ama rastgele/uçuk
+                            // kelime seçimlerini biraz azaltır
+        topK: 40,
+        onToken: (id) => {
+          if (cancelToken.cancelled) return true;
+          generatedIds.push(id);
+          return tokenizer.decode(generatedIds).includes(STOP_MARKER);
+        },
+      });
+
+      if (cancelToken.cancelled) {
+        aiDiv.textContent = "İptal edildi.";
+        endRequest(cancelToken);
+        sendBtn.disabled = false;
+        return;
       }
 
+      let text = tokenizer.decode(outputIds);
+      const stopIdx = text.indexOf(STOP_MARKER);
+      if (stopIdx !== -1) text = text.slice(0, stopIdx);
+      modelText = text.trim() || "(boş çıktı)";
+
       // Cevabı açıkça etiketlenmiş bölümler olarak sunuyoruz: (a) internetten/
-      // belgeden BULUNAN gerçek bilgi (güvenilir, kaynaklı) (b) - sadece güven
-      // düşükse - küçük modelin ürettiği YORUM (spekülatif). Bunları karıştırıp
-      // tek bir "cevap" gibi sunmak, hangisinin gerçek kaynağa dayandığını
+      // belgeden BULUNAN gerçek bilgi (güvenilir, kaynaklı) (b) küçük
+      // modelin kendi yorumu (spekülatif olabilir). Bunları karıştırıp tek
+      // bir "cevap" gibi sunmak, hangisinin gerçek kaynağa dayandığını
       // gizleyip yanıltıcı olurdu.
       const sections = [];
 
       if (searchSummary || memorySummary) {
         const foundParts = [searchSummary, memorySummary].filter(Boolean).join("\n");
-        const label = skipModel ? "📚 Bulunan bilgiler (güvenilir):" : "📚 Bulunan bilgiler:";
-        sections.push(`${label}\n${foundParts}`);
+        sections.push(`📚 Bulunan bilgiler:\n${foundParts}`);
       }
 
-      if (!skipModel) {
-        sections.push(`🤖 Modelin yorumu (küçük model, kesin bilgi değil):\n${modelText}`);
-      }
+      sections.push(`🤖 Cevap:\n${modelText}`);
 
       if (searchSources.length > 0) {
         const sourceList = searchSources
-          .map((s) => `${s.trusted ? "✅" : "•"} ${s.title} (${s.url})`)
+          .map((s) => `• ${s.title} (${s.url})`)
           .join("\n");
         sections.push(`--- Kaynaklar ---\n${sourceList}`);
       }
@@ -331,10 +444,10 @@
       const finalText = sections.join("\n\n");
 
       aiDiv.textContent = finalText;
-      addRunButtonsToMessage(aiDiv, finalText);
     } catch (err) {
       aiDiv.textContent = `Hata: ${err.message}`;
     } finally {
+      endRequest(cancelToken);
       sendBtn.disabled = false;
     }
   }
@@ -391,6 +504,7 @@
     location.reload(true);
   });
 
+  saveTeachings(loadTeachings()); // sayfa yenilense bile önceki (indirilmemiş) öğretileri göster
   init();
 </script>
 
