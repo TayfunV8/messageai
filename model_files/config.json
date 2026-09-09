@@ -1,9 +1,0 @@
-{
-  "vocab_size": 4000,
-  "block_size": 192,
-  "n_layer": 6,
-  "n_head": 6,
-  "n_embd": 336,
-  "dropout": 0.1,
-  "bias": false
-}
