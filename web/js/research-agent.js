@@ -12,28 +12,11 @@
  * değiştirmen gerekiyor (kurulum talimatı worker.js dosyasının başında).
  */
 
-const PROXY_URL = "https://messageai.messageai.workers.dev/"; // <-- BURAYI DEĞİŞTİR
+const PROXY_URL = "https://messageai.messageai.workers.dev"; // <-- BURAYI DEĞİŞTİR
 
 import { buildIdf, embed, cosineSimilarity } from "./embeddings.js";
 
-/**
- * Kurulum sırasında en sık yapılan hata: PROXY_URL'i kendi Worker adresiyle
- * değiştirmeyi unutmak. Bu durumda istek zaten var olmayan bir domain'e
- * gidip genel bir "fetch failed" hatası verir - bu da sorunun ne olduğunu
- * anlamayı zorlaştırır. Bunun yerine, en baştan net bir Türkçe hata
- * fırlatıyoruz ki README'deki Adım 2'ye geri dönülmesi gerektiği açık olsun.
- */
-function assertProxyConfigured() {
-  if (!PROXY_URL || PROXY_URL.includes("https://messageai.messageai.workers.dev/")) {
-    throw new Error(
-      "PROXY_URL ayarlanmamış. js/research-agent.js dosyasının en üstündeki " +
-        'PROXY_URL değerini kendi Cloudflare Worker adresinle değiştir (README, Adım 2).'
-    );
-  }
-}
-
 function proxied(targetUrl) {
-  assertProxyConfigured();
   return `${PROXY_URL}/?url=${encodeURIComponent(targetUrl)}`;
 }
 
@@ -213,3 +196,4 @@ export async function runResearch(query, options = {}) {
   const { text, confidence } = extractiveSummary(sources, query);
   return { query, sources, summary: text, confidence };
 }
+
