@@ -12,7 +12,7 @@
  * değiştirmen gerekiyor (kurulum talimatı worker.js dosyasının başında).
  */
 
-const PROXY_URL = "http://messageai.messageai.workers.dev"; // <-- BURAYI DEĞİŞTİR
+const PROXY_URL = "https://messageai.messageai.workers.dev"; // <-- BURAYI DEĞİŞTİR
 
 import { buildIdf, embed, cosineSimilarity } from "./embeddings.js";
 
